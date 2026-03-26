@@ -91,6 +91,12 @@ EipStatus SearchConnectionData(CipInstance *instance,
                                const struct sockaddr *originator_address,
                                const CipUdint encapsulation_session);
 
+EipStatus UnconnectedSend(CipInstance *instance,
+                          CipMessageRouterRequest *message_router_request,
+                          CipMessageRouterResponse *message_router_response,
+                          const struct sockaddr *originator_address,
+                          const CipSessionHandle encapsulation_session);
+
 void AssembleConnectionDataResponseMessage(
   CipMessageRouterResponse *message_router_response,
   CipConnectionObject *connection_object);
@@ -241,7 +247,7 @@ EipStatus ConnectionManagerInit(EipUint16 unique_connection_id) {
                                                 2, /* # of class services */
                                                 0, /* # of instance attributes */
                                                 14, /* # highest instance attribute number*/
-                                                8, /* # of instance services */
+                                                9, /* # of instance services */
                                                 1, /* # of instances */
                                                 "connection manager", /* class name */
                                                 1, /* revision */
@@ -262,6 +268,10 @@ EipStatus ConnectionManagerInit(EipUint16 unique_connection_id) {
                 kLargeForwardOpen,
                 &LargeForwardOpen,
                 "LargeForwardOpen");
+  InsertService(connection_manager,
+                kUnconnectedSend,
+                &UnconnectedSend,
+                "UnconnectedSend");
   InsertService(connection_manager, kForwardClose, &ForwardClose,
                 "ForwardClose");
   InsertService(connection_manager,
@@ -752,6 +762,108 @@ EipStatus GetConnectionOwner(CipInstance *instance,
   (void) encapsulation_session;
 
   return kEipStatusOk;
+}
+
+EipStatus UnconnectedSend(CipInstance *instance,
+                          CipMessageRouterRequest *message_router_request,
+                          CipMessageRouterResponse *message_router_response,
+                          const struct sockaddr *originator_address,
+                          const CipSessionHandle encapsulation_session) {
+  (void)instance;
+
+  const EipUint8 *request_data = message_router_request->data;
+  size_t remaining = message_router_request->request_data_size;
+
+  if(remaining < 4) {
+    OPENER_TRACE_WARN(
+      "UnconnectedSend: request too short, size=%u\n",
+      (unsigned)message_router_request->request_data_size);
+    message_router_response->reply_service = 0x80 | kUnconnectedSend;
+    message_router_response->general_status = kCipErrorNotEnoughData;
+    message_router_response->size_of_additional_status = 1;
+    message_router_response->additional_status[0] =
+      kConnectionManagerExtendedStatusCodeErrorParameterErrorInUnconnectedSendService;
+    return kEipStatusOkSend;
+  }
+
+  const EipUint8 priority_time_tick = GetUsintFromMessage(&request_data);
+  const EipUint8 timeout_ticks = GetUsintFromMessage(&request_data);
+  const EipUint16 embedded_request_size = GetUintFromMessage(&request_data);
+  remaining -= 4;
+
+  OPENER_TRACE_INFO(
+    "UnconnectedSend: priority_time_tick=0x%02x timeout_ticks=0x%02x embedded_request_size=%u remaining=%u\n",
+    priority_time_tick,
+    timeout_ticks,
+    embedded_request_size,
+    (unsigned)remaining);
+
+  if(embedded_request_size > remaining) {
+    OPENER_TRACE_WARN(
+      "UnconnectedSend: embedded request truncated, embedded_request_size=%u remaining=%u\n",
+      embedded_request_size,
+      (unsigned)remaining);
+    message_router_response->reply_service = 0x80 | kUnconnectedSend;
+    message_router_response->general_status = kCipErrorNotEnoughData;
+    message_router_response->size_of_additional_status = 1;
+    message_router_response->additional_status[0] =
+      kConnectionManagerExtendedStatusCodeErrorParameterErrorInUnconnectedSendService;
+    return kEipStatusOkSend;
+  }
+
+  EipUint8 *embedded_request = (EipUint8 *)request_data;
+  request_data += embedded_request_size;
+  remaining -= embedded_request_size;
+
+  EipUint8 route_path_size = 0;
+  EipUint8 reserved = 0;
+  if(remaining >= 1) {
+    route_path_size = GetUsintFromMessage(&request_data);
+    remaining -= 1;
+  }
+  if(remaining >= 1) {
+    reserved = GetUsintFromMessage(&request_data);
+    remaining -= 1;
+  }
+
+  const size_t route_path_bytes = (size_t)route_path_size * 2;
+  if(route_path_bytes > remaining) {
+    OPENER_TRACE_WARN(
+      "UnconnectedSend: route path truncated, route_path_size=%u remaining=%u\n",
+      route_path_size,
+      (unsigned)remaining);
+    message_router_response->reply_service = 0x80 | kUnconnectedSend;
+    message_router_response->general_status =
+      kConnectionManagerGeneralStatusPathSegmentErrorInUnconnectedSend;
+    message_router_response->size_of_additional_status = 1;
+    message_router_response->additional_status[0] =
+      kConnectionManagerExtendedStatusCodeErrorParameterErrorInUnconnectedSendService;
+    return kEipStatusOkSend;
+  }
+
+  OPENER_TRACE_INFO(
+    "UnconnectedSend: forwarding embedded service=0x%02x route_path_size=%u reserved=0x%02x trailing_route_bytes=%u extra_bytes=%u\n",
+    embedded_request_size > 0 ? embedded_request[0] : 0,
+    route_path_size,
+    reserved,
+    (unsigned)route_path_bytes,
+    (unsigned)(remaining - route_path_bytes));
+
+  EipStatus status = NotifyMessageRouter(embedded_request,
+                                         embedded_request_size,
+                                         message_router_response,
+                                         originator_address,
+                                         encapsulation_session);
+
+  OPENER_TRACE_INFO(
+    "UnconnectedSend: routed embedded service=0x%02x status=%d reply_service=0x%02x general_status=0x%02x rsp_payload_len=%u\n",
+    embedded_request_size > 0 ? embedded_request[0] : 0,
+    status,
+    message_router_response->reply_service,
+    message_router_response->general_status,
+    (unsigned)message_router_response->message.used_message_length);
+
+  return status;
 }
 
 EipStatus GetConnectionData(CipInstance *instance,

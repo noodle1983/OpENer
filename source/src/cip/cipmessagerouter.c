@@ -9,6 +9,7 @@
 #include "ciperror.h"
 #include "trace.h"
 #include "enipmessage.h"
+#include <string.h>
 
 #include "cipmessagerouter.h"
 
@@ -47,6 +48,13 @@ EipStatus RegisterCipClass(CipClass *cip_class);
 CipError CreateMessageRouterRequestStructure(const EipUint8 *data,
                                              EipInt16 data_length,
                                              CipMessageRouterRequest *message_router_request);
+
+static EipStatus MultipleServicePacketService(
+  CipInstance *const instance,
+  CipMessageRouterRequest *const message_router_request,
+  CipMessageRouterResponse *const message_router_response,
+  const struct sockaddr *originator_address,
+  const CipSessionHandle encapsulation_session);
 
 void InitializeCipMessageRouterClass(CipClass *cip_class) {
 
@@ -87,7 +95,7 @@ EipStatus CipMessageRouterInit() {
                                             2, /* # of class services */
                                             0, /* # of instance attributes */
                                             0, /* # highest instance attribute number */
-                                            1, /* # of instance services */
+                                            2, /* # of instance services */
                                             1, /* # of instances */
                                             "message router", /* class name */
                                             1, /* # class revision*/
@@ -99,9 +107,145 @@ EipStatus CipMessageRouterInit() {
                 kGetAttributeSingle,
                 &GetAttributeSingle,
                 "GetAttributeSingle");
+  InsertService(message_router,
+                kMultipleServicePacket,
+                &MultipleServicePacketService,
+                "MultipleServicePacket");
 
   /* reserved for future use -> set to zero */
   return kEipStatusOk;
+}
+
+static EipStatus MultipleServicePacketService(
+  CipInstance *const instance,
+  CipMessageRouterRequest *const message_router_request,
+  CipMessageRouterResponse *const message_router_response,
+  const struct sockaddr *originator_address,
+  const CipSessionHandle encapsulation_session) {
+  (void)instance;
+
+  InitializeENIPMessage(&message_router_response->message);
+  message_router_response->reply_service =
+    (0x80 | message_router_request->service);
+  message_router_response->general_status = kCipErrorSuccess;
+  message_router_response->size_of_additional_status = 0;
+  message_router_response->reserved = 0;
+
+  if(message_router_request->request_data_size < 2) {
+    message_router_response->general_status = kCipErrorNotEnoughData;
+    return kEipStatusOkSend;
+  }
+
+  const EipUint8 *request_data = message_router_request->data;
+  const EipUint8 *request_runner = request_data;
+  const EipUint16 service_count = GetUintFromMessage(&request_runner);
+  const size_t offsets_size = (size_t)service_count * sizeof(EipUint16);
+  const size_t header_size = sizeof(EipUint16) + offsets_size;
+
+  if(message_router_request->request_data_size < header_size) {
+    message_router_response->general_status = kCipErrorNotEnoughData;
+    return kEipStatusOkSend;
+  }
+
+  if(0 == service_count) {
+    return kEipStatusOkSend;
+  }
+
+  EipUint16 request_offsets[256];
+  EipUint16 response_offsets[256];
+  if(service_count > 256) {
+    message_router_response->general_status = kCipErrorInvalidParameter;
+    return kEipStatusOkSend;
+  }
+
+  for(EipUint16 i = 0; i < service_count; ++i) {
+    request_offsets[i] = GetUintFromMessage(&request_runner);
+  }
+
+  for(EipUint16 i = 0; i < service_count; ++i) {
+    const size_t request_offset = request_offsets[i];
+    const size_t next_offset = (i + 1 < service_count)
+      ? request_offsets[i + 1]
+      : message_router_request->request_data_size;
+
+    if(request_offset < header_size ||
+       request_offset > message_router_request->request_data_size ||
+       next_offset < request_offset ||
+       next_offset > message_router_request->request_data_size) {
+      message_router_response->general_status = kCipErrorInvalidParameter;
+      return kEipStatusOkSend;
+    }
+  }
+
+  AddIntToMessage(service_count, &message_router_response->message);
+  for(EipUint16 i = 0; i < service_count; ++i) {
+    AddIntToMessage(0, &message_router_response->message);
+  }
+
+  for(EipUint16 i = 0; i < service_count; ++i) {
+    const size_t request_offset = request_offsets[i];
+    const size_t next_offset = (i + 1 < service_count)
+      ? request_offsets[i + 1]
+      : message_router_request->request_data_size;
+    const size_t request_size = next_offset - request_offset;
+    EipUint8 *embedded_request = (EipUint8 *)(request_data + request_offset);
+
+    CipMessageRouterResponse embedded_response;
+    memset(&embedded_response, 0, sizeof(embedded_response));
+    InitializeENIPMessage(&embedded_response.message);
+
+    const EipStatus status = NotifyMessageRouter(
+      embedded_request,
+      (int)request_size,
+      &embedded_response,
+      originator_address,
+      encapsulation_session);
+
+    if(kEipStatusError == status) {
+      embedded_response.reply_service = 0x80 | embedded_request[0];
+      embedded_response.general_status = kCipErrorServiceNotSupported;
+      embedded_response.size_of_additional_status = 0;
+      embedded_response.reserved = 0;
+      InitializeENIPMessage(&embedded_response.message);
+    }
+
+    response_offsets[i] =
+      (EipUint16)message_router_response->message.used_message_length;
+
+    AddSintToMessage(embedded_response.reply_service,
+                     &message_router_response->message);
+    AddSintToMessage(embedded_response.reserved,
+                     &message_router_response->message);
+    AddSintToMessage(embedded_response.general_status,
+                     &message_router_response->message);
+    AddSintToMessage(embedded_response.size_of_additional_status,
+                     &message_router_response->message);
+
+    for(EipUint8 j = 0; j < embedded_response.size_of_additional_status; ++j) {
+      AddIntToMessage(embedded_response.additional_status[j],
+                      &message_router_response->message);
+    }
+
+    if(embedded_response.message.used_message_length > 0) {
+      memcpy(message_router_response->message.current_message_position,
+             embedded_response.message.message_buffer,
+             embedded_response.message.used_message_length);
+      message_router_response->message.current_message_position +=
+        embedded_response.message.used_message_length;
+      message_router_response->message.used_message_length +=
+        embedded_response.message.used_message_length;
+    }
+  }
+
+  for(EipUint16 i = 0; i < service_count; ++i) {
+    EipUint8 *offset_ptr =
+      message_router_response->message.message_buffer + sizeof(EipUint16) +
+      i * sizeof(EipUint16);
+    offset_ptr[0] = (EipUint8)(response_offsets[i] & 0xFF);
+    offset_ptr[1] = (EipUint8)((response_offsets[i] >> 8) & 0xFF);
+  }
+
+  return kEipStatusOkSend;
 }
 
 /** @brief Get the registered MessageRouter object corresponding to ClassID.

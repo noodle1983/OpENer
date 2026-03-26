@@ -8,6 +8,7 @@
 #include "cpf.h"
 
 #include "opener_api.h"
+#include "opener_symbolic_tag.h"
 #include "cipcommon.h"
 #include "cipmessagerouter.h"
 #include "endianconv.h"
@@ -469,7 +470,14 @@ void EncodeSequenceNumber(
 void EncodeReplyService(
   const CipMessageRouterResponse *const message_router_response,
   ENIPMessage *const outgoing_message) {
-  AddSintToMessage(message_router_response->reply_service, outgoing_message);
+  EipUint8 reply_service = OpenerSymbolicTagConsumeReplyServiceOverride();
+  if(0 == reply_service) {
+    reply_service = message_router_response->reply_service;
+  }
+  OPENER_TRACE_INFO("cpf: EncodeReplyService rsp[40]=0x%02x original_reply_service=0x%02x\n",
+                    reply_service,
+                    message_router_response->reply_service);
+  AddSintToMessage(reply_service, outgoing_message);
 }
 
 /**

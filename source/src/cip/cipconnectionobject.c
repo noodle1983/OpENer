@@ -610,9 +610,8 @@ void ConnectionObjectResetLastPackageInactivityTimerValue(
 
 uint64_t ConnectionObjectCalculateRegularInactivityWatchdogTimerValue(
   const CipConnectionObject *const connection_object) {
-  return ( ( (uint64_t)(connection_object->o_to_t_requested_packet_interval) /
-             (uint64_t) 1000 ) <<
-           (2 + connection_object->connection_timeout_multiplier) );
+  (void)connection_object;
+  return 600000; /* Keep explicit/IO connections alive for 10 minutes in the simulator. */
 }
 
 CipUint ConnectionObjectGetConnectionSerialNumber(

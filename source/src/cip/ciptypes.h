@@ -231,6 +231,8 @@ typedef struct {
   EipUint16 class_id;   /**< Class ID of the linked object */
   CipInstanceNum instance_number;   /**< Requested Instance Number of the linked object */
   EipUint16 attribute_number;   /**< Requested Attribute Number of the linked object */
+  EipUint16 symbolic_tag_size;   /**< Length of the decoded symbolic tag in bytes */
+  EipByte symbolic_tag[256];   /**< Decoded symbolic tag path */
 } CipEpath;
 
 typedef enum connection_point_type {

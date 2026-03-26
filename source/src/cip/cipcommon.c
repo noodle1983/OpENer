@@ -27,6 +27,7 @@
 #include "trace.h"
 #include "appcontype.h"
 #include "cipepath.h"
+#include "opener_symbolic_tag.h"
 #include "stdlib.h"
 #include "ciptypes.h"
 #include "cipstring.h"
@@ -135,6 +136,32 @@ EipStatus NotifyClass(const CipClass *RESTRICT const cip_class,
       }
     } OPENER_TRACE_WARN(
       "notify: service 0x%x not supported\n", message_router_request->service);
+
+    if(instance_number == 0 &&
+       (cip_class->class_code == 0x006B || cip_class->class_code == 0x006C) &&
+       NULL != cip_class->services) {
+      OPENER_TRACE_INFO(
+        "notify: trying class-level fallback for class 0x%x service 0x%x\n",
+        (unsigned)cip_class->class_code,
+        message_router_request->service);
+      service = cip_class->services;
+      for(size_t i = 0; i < cip_class->number_of_services; i++) {
+        if(message_router_request->service == service->service_number) {
+          OPENER_TRACE_INFO(
+            "notify: class-level fallback to instance service %s for class 0x%x\n",
+            service->name,
+            (unsigned)cip_class->class_code);
+          OPENER_ASSERT(NULL != service->service_function);
+          return service->service_function((CipInstance *)cip_class,
+                                           message_router_request,
+                                           message_router_response,
+                                           originator_address,
+                                           encapsulation_session);
+        }
+        service++;
+      }
+    }
+
     message_router_response->general_status = kCipErrorServiceNotSupported; /* if no services or service not found, return an error reply*/
   } else {
     OPENER_TRACE_WARN("notify: instance number %d unknown\n", instance_number);
@@ -1385,6 +1412,45 @@ void EncodeEPath(const void *const data,
     message->used_message_length - start_length);
 }
 
+static int AppendSymbolicTagText(CipEpath *const target,
+                                 const EipUint8 *const text,
+                                 const size_t text_length) {
+  if(0 == text_length) {
+    return -1;
+  }
+  if(0 != target->symbolic_tag_size) {
+    if(target->symbolic_tag_size + 1 >= sizeof(target->symbolic_tag)) {
+      return -1;
+    }
+    target->symbolic_tag[target->symbolic_tag_size++] = '.';
+  }
+  if(target->symbolic_tag_size + text_length >= sizeof(target->symbolic_tag)) {
+    return -1;
+  }
+  memcpy(target->symbolic_tag + target->symbolic_tag_size, text, text_length);
+  target->symbolic_tag_size += (EipUint16)text_length;
+  target->symbolic_tag[target->symbolic_tag_size] = '\0';
+  return 0;
+}
+
+static int AppendSymbolicArrayIndex(CipEpath *const target,
+                                    const EipUint32 array_index) {
+  char index_text[24];
+  const int text_length = snprintf(index_text, sizeof(index_text), "[%lu]",
+                                   (unsigned long)array_index);
+  if(text_length <= 0) {
+    return -1;
+  }
+  if(target->symbolic_tag_size + (size_t)text_length >= sizeof(target->symbolic_tag)) {
+    return -1;
+  }
+  memcpy(target->symbolic_tag + target->symbolic_tag_size, index_text,
+         (size_t)text_length);
+  target->symbolic_tag_size += (EipUint16)text_length;
+  target->symbolic_tag[target->symbolic_tag_size] = '\0';
+  return 0;
+}
+
 EipStatus DecodePaddedEPath(CipEpath *epath,
                             const EipUint8 **message,
                             size_t *const bytes_consumed) {
@@ -1398,6 +1464,8 @@ EipStatus DecodePaddedEPath(CipEpath *epath,
   epath->class_id = 0;
   epath->instance_number = 0;
   epath->attribute_number = 0;
+  epath->symbolic_tag_size = 0;
+  epath->symbolic_tag[0] = '\0';
 
   while(number_of_decoded_elements < epath->path_size) {
     if( kSegmentTypeReserved == ( (*message_runner) & kSegmentTypeReserved ) ) {
@@ -1448,18 +1516,89 @@ EipStatus DecodePaddedEPath(CipEpath *epath,
 
       case SEGMENT_TYPE_LOGICAL_SEGMENT + LOGICAL_SEGMENT_TYPE_MEMBER_ID +
         LOGICAL_SEGMENT_FORMAT_EIGHT_BIT:
+        if(0 != epath->symbolic_tag_size) {
+          if(AppendSymbolicArrayIndex(epath, *(EipUint8 *)(message_runner + 1)) != 0) {
+            return kEipStatusError;
+          }
+        }
         message_runner += 2;
         break;
       case SEGMENT_TYPE_LOGICAL_SEGMENT + LOGICAL_SEGMENT_TYPE_MEMBER_ID +
         LOGICAL_SEGMENT_FORMAT_SIXTEEN_BIT:
+        if(0 != epath->symbolic_tag_size) {
+          message_runner += 2;
+          if(AppendSymbolicArrayIndex(epath, GetUintFromMessage(&(message_runner))) != 0) {
+            return kEipStatusError;
+          }
+          number_of_decoded_elements++;
+          break;
+        }
         message_runner += 2;
         number_of_decoded_elements++;
         break;
+      case SEGMENT_TYPE_LOGICAL_SEGMENT + LOGICAL_SEGMENT_TYPE_EXTENDED_LOGICAL +
+        LOGICAL_SEGMENT_FORMAT_EIGHT_BIT:
+      case SEGMENT_TYPE_LOGICAL_SEGMENT + LOGICAL_SEGMENT_TYPE_EXTENDED_LOGICAL +
+        LOGICAL_SEGMENT_FORMAT_SIXTEEN_BIT:
+      case SEGMENT_TYPE_LOGICAL_SEGMENT + LOGICAL_SEGMENT_TYPE_EXTENDED_LOGICAL +
+        LOGICAL_SEGMENT_FORMAT_THIRTY_TWO_BIT:
+        if(LOGICAL_SEGMENT_EXTENDED_TYPE_ARRAY_INDEX != *(message_runner + 1)) {
+          return kEipStatusError;
+        }
+        if(0 == epath->symbolic_tag_size) {
+          return kEipStatusError;
+        }
+        switch((*message_runner) & 0x03) {
+          case LOGICAL_SEGMENT_FORMAT_EIGHT_BIT:
+            if(AppendSymbolicArrayIndex(epath, *(EipUint8 *)(message_runner + 2)) != 0) {
+              return kEipStatusError;
+            }
+            message_runner += 4;
+            number_of_decoded_elements += 1;
+            break;
+          case LOGICAL_SEGMENT_FORMAT_SIXTEEN_BIT: {
+            const EipUint8 *value_runner = message_runner + 2;
+            if(AppendSymbolicArrayIndex(epath, GetUintFromMessage(&value_runner)) != 0) {
+              return kEipStatusError;
+            }
+            message_runner += 4;
+            number_of_decoded_elements += 1;
+            break;
+          }
+          case LOGICAL_SEGMENT_FORMAT_THIRTY_TWO_BIT: {
+            const EipUint8 *value_runner = message_runner + 2;
+            if(AppendSymbolicArrayIndex(epath, GetDwordFromMessage(&value_runner)) != 0) {
+              return kEipStatusError;
+            }
+            message_runner += 6;
+            number_of_decoded_elements += 2;
+            break;
+          }
+          default:
+            return kEipStatusError;
+        }
+        break;
+      case SEGMENT_TYPE_DATA_SEGMENT + DATA_SEGMENT_SUBTYPE_ANSI_EXTENDED_SYMBOL: {
+        const size_t symbol_length = *(message_runner + 1);
+        const size_t segment_byte_length = 2 + symbol_length + (symbol_length & 0x01);
+        if(AppendSymbolicTagText(epath, message_runner + 2, symbol_length) != 0) {
+          return kEipStatusError;
+        }
+        message_runner += segment_byte_length;
+        number_of_decoded_elements += (unsigned int)(segment_byte_length / 2) - 1;
+        break;
+      }
 
       default:
         OPENER_TRACE_ERR("wrong path requested\n");
         return kEipStatusError;
     }
+  }
+
+  if(0 != epath->symbolic_tag_size) {
+    epath->class_id = OPENER_SYMBOLIC_TAG_CLASS_CODE;
+    epath->instance_number = OPENER_SYMBOLIC_TAG_INSTANCE_ID;
+    epath->attribute_number = 0;
   }
 
   *message = message_runner;
