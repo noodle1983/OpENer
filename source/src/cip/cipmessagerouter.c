@@ -137,12 +137,19 @@ static EipStatus MultipleServicePacketService(
   }
 
   const EipUint8 *request_data = message_router_request->data;
+  const size_t request_data_size = message_router_request->request_data_size;
   const EipUint8 *request_runner = request_data;
   const EipUint16 service_count = GetUintFromMessage(&request_runner);
   const size_t offsets_size = (size_t)service_count * sizeof(EipUint16);
   const size_t header_size = sizeof(EipUint16) + offsets_size;
 
-  if(message_router_request->request_data_size < header_size) {
+  OPENER_TRACE_INFO(
+    "mr-msp: service_count=%u request_data_size=%d header_size=%u\n",
+    service_count,
+    (int)request_data_size,
+    (unsigned int)header_size);
+
+  if(request_data_size < header_size) {
     message_router_response->general_status = kCipErrorNotEnoughData;
     return kEipStatusOkSend;
   }
@@ -166,15 +173,22 @@ static EipStatus MultipleServicePacketService(
     const size_t request_offset = request_offsets[i];
     const size_t next_offset = (i + 1 < service_count)
       ? request_offsets[i + 1]
-      : message_router_request->request_data_size;
+      : request_data_size;
 
     if(request_offset < header_size ||
-       request_offset > message_router_request->request_data_size ||
+       request_offset > request_data_size ||
        next_offset < request_offset ||
-       next_offset > message_router_request->request_data_size) {
+       next_offset > request_data_size) {
       message_router_response->general_status = kCipErrorInvalidParameter;
       return kEipStatusOkSend;
     }
+
+    OPENER_TRACE_INFO(
+      "mr-msp: request[%u] offset=%u next=%u size=%u\n",
+      i,
+      (unsigned int)request_offset,
+      (unsigned int)next_offset,
+      (unsigned int)(next_offset - request_offset));
   }
 
   AddIntToMessage(service_count, &message_router_response->message);
@@ -186,9 +200,16 @@ static EipStatus MultipleServicePacketService(
     const size_t request_offset = request_offsets[i];
     const size_t next_offset = (i + 1 < service_count)
       ? request_offsets[i + 1]
-      : message_router_request->request_data_size;
+      : request_data_size;
     const size_t request_size = next_offset - request_offset;
     EipUint8 *embedded_request = (EipUint8 *)(request_data + request_offset);
+
+    OPENER_TRACE_INFO(
+      "mr-msp: dispatch[%u] service=0x%02x path_words=%u size=%u\n",
+      i,
+      embedded_request[0],
+      (request_size > 1) ? embedded_request[1] : 0,
+      (unsigned int)request_size);
 
     CipMessageRouterResponse embedded_response;
     memset(&embedded_response, 0, sizeof(embedded_response));

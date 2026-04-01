@@ -856,12 +856,12 @@ EipStatus UnconnectedSend(CipInstance *instance,
                                          encapsulation_session);
 
   OPENER_TRACE_INFO(
-    "UnconnectedSend: routed embedded service=0x%02x status=%d reply_service=0x%02x general_status=0x%02x rsp_payload_len=%u\n",
+    "UnconnectedSend: routed embedded service=0x%02x status=%d reply_service=0x%02x general_status=0x%02x rsp_payload_len=%zu\n",
     embedded_request_size > 0 ? embedded_request[0] : 0,
     status,
     message_router_response->reply_service,
     message_router_response->general_status,
-    (unsigned)message_router_response->message.used_message_length);
+    message_router_response->message.used_message_length);
 
   return status;
 }

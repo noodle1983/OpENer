@@ -562,12 +562,17 @@ void EncodeExtendedStatus(
 void EncodeUnconnectedDataItemLength(
   const CipMessageRouterResponse *const message_router_response,
   ENIPMessage *const outgoing_message) {
-  AddIntToMessage( (EipUint16) (message_router_response->message.
-                                used_message_length + 4                                 /* TODO: Magic number */
-                                + (2 *
-                                   message_router_response->
-                                   size_of_additional_status) ),
-                   outgoing_message );
+  const EipUint16 item_length =
+    (EipUint16)(message_router_response->message.used_message_length + 4 +
+                (2 * message_router_response->size_of_additional_status));
+  OPENER_TRACE_INFO(
+    "cpf: unconnected data item length mr_used_len=%zu add_status_count=%u encoded_item_len=%u reply_service=0x%02x general_status=0x%02x\n",
+    message_router_response->message.used_message_length,
+    message_router_response->size_of_additional_status,
+    item_length,
+    message_router_response->reply_service,
+    message_router_response->general_status);
+  AddIntToMessage(item_length, outgoing_message);
 }
 
 /**
@@ -579,14 +584,30 @@ void EncodeUnconnectedDataItemLength(
 void EncodeMessageRouterResponseData(
   const CipMessageRouterResponse *const message_router_response,
   ENIPMessage *const outgoing_message) {
+  const size_t payload_len = message_router_response->message.used_message_length;
+  const size_t remaining =
+    (outgoing_message->used_message_length <= PC_OPENER_ETHERNET_BUFFER_SIZE)
+      ? (PC_OPENER_ETHERNET_BUFFER_SIZE - outgoing_message->used_message_length)
+      : 0;
+
+  if(payload_len > remaining) {
+    OPENER_TRACE_ERR(
+      "cpf: response payload overflow payload_len=%zu remaining=%zu used=%zu buffer=%u reply_service=0x%02x general_status=0x%02x\n",
+      payload_len,
+      remaining,
+      outgoing_message->used_message_length,
+      PC_OPENER_ETHERNET_BUFFER_SIZE,
+      message_router_response->reply_service,
+      message_router_response->general_status);
+    return;
+  }
+
   memcpy(outgoing_message->current_message_position,
          message_router_response->message.message_buffer,
-         message_router_response->message.used_message_length);
+         payload_len);
 
-  outgoing_message->current_message_position +=
-    message_router_response->message.used_message_length;
-  outgoing_message->used_message_length +=
-    message_router_response->message.used_message_length;
+  outgoing_message->current_message_position += payload_len;
+  outgoing_message->used_message_length += payload_len;
 }
 
 /**
